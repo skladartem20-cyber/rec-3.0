@@ -31,7 +31,9 @@ $('f').addEventListener('submit', async (e) => {
     E2E.reset();
     if (!(await E2E.session())) throw new Error('Браузер не сохранил вход. Выключите приватный режим Safari и повторите.');
     sessionStorage.removeItem('sr-401');
-    if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('reset');
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'key', raw, sess: d.session });
+    }
     location.replace('/');
     return;
   } catch (x) {

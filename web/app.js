@@ -32,9 +32,15 @@ const nowSrv = () => Date.now() / 1000 + S.skew;
 
 // ------------------------------------------------------------ net
 async function api(path, data) {
-  const opt = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) };
-  const r = await fetch(path, opt);
-  if (r.status === 401) { authLost('сервер не принял вход при запросе ' + path); throw new Error('auth'); }
+  let r;
+  if (window.E2E) {
+    // облако: страница сама шифрует запрос (без фонового модуля — надёжно в Safari)
+    r = await window.E2E.request(data === undefined ? 'GET' : 'POST', path, {}, data === undefined ? null : JSON.stringify(data));
+  } else {
+    const opt = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) };
+    r = await fetch(path, opt);
+  }
+  if (r.status === 401) { authLost((window.E2E && window.E2E.why) || ('сервер не принял вход при запросе ' + path)); throw new Error('auth'); }
   return r.json();
 }
 
@@ -217,7 +223,9 @@ function updateCard(el, r) {
   const img = $('.thumb img', el), ph = $('.thumb .ph', el);
   if (r.preview_t) {
     const src = `/preview/${r.id}.jpg?t=${r.preview_t}`;
-    if (img.dataset.src !== src) {
+    if (img.dataset.src !== src && window.E2E && !navigator.serviceWorker?.controller) {
+      img.dataset.src = src; img.src = src; img.hidden = false; ph.innerHTML = '';   // запасной путь (Safari без фонового модуля)
+    } else if (img.dataset.src !== src) {
       const pre = new Image();
       pre.onload = () => { img.src = src; img.hidden = false; ph.innerHTML = ''; };
       pre.src = src; img.dataset.src = src;
@@ -647,8 +655,9 @@ async function loadSettings() {
     ${S.local ? '<div class="sgroup" id="cloudTools"></div>' : ''}
     <div class="save-row"><button class="btn primary" id="saveSettings">Сохранить настройки</button><span id="saveMsg" style="color:var(--muted)"></span></div>`;
   $('#saveSettings').onclick = saveSettings;
-  const lo = $('#logout'); if (lo) lo.onclick = async () => { await forgetKey(); try { await fetch('/api/logout', { method: 'POST' }); } catch { } location.href = '/login'; };
-  const loa = $('#logoutAll'); if (loa) loa.onclick = async () => { if (!confirm('Выйти на всех устройствах?')) return; await forgetKey(); await fetch('/api/logout_all', { method: 'POST' }); location.href = '/login'; };
+  const sessHdr = async () => { const t = window.E2E ? await window.E2E.session() : null; return t ? { 'X-SR-Session': t } : {}; };
+  const lo = $('#logout'); if (lo) lo.onclick = async () => { try { await fetch('/api/logout', { method: 'POST', headers: await sessHdr() }); } catch { } await forgetKey(); location.href = '/login'; };
+  const loa = $('#logoutAll'); if (loa) loa.onclick = async () => { if (!confirm('Выйти на всех устройствах?')) return; try { await fetch('/api/logout_all', { method: 'POST', headers: await sessHdr() }); } catch { } await forgetKey(); location.href = '/login'; };
   if (S.local) renderCloudTools(s);
 }
 async function saveSettings() {
@@ -916,7 +925,7 @@ function applyMeta(d) {
 async function forgetKey() {
   if (window.E2E) {
     await window.E2E.forget();
-    navigator.serviceWorker?.controller?.postMessage('reset');
+    navigator.serviceWorker?.controller?.postMessage({ type: 'reset' });
   }
 }
 let keyWarned = false;

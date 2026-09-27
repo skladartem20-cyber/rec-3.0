@@ -1,7 +1,7 @@
 'use strict';
 /* StreamRec — сквозное шифрование в браузере (страница и service worker).
-   Ключ AES-256-GCM получается из пароля на этом устройстве и хранится в IndexedDB
-   как неизвлекаемый CryptoKey. В облако уходят только шифротексты. */
+   Ключ AES-256-GCM получается из пароля на этом устройстве. Хранится в IndexedDB этого сайта;
+   фоновому модулю (service worker) страница передаёт его напрямую — так работает и в Safari. */
 (function (G) {
   const enc = new TextEncoder(), dec = new TextDecoder();
   const b64 = (buf) => { let s = ''; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); };
@@ -27,39 +27,41 @@
     });
   }
   const importRaw = (raw) => crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-  let cached = null, sess = null;
+  let cached = null, raw = null, sess = null;
+
   const E2E = {
     async derive(password, saltB64, iter) {
       const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
       const bits = new Uint8Array(await crypto.subtle.deriveBits(
         { name: 'PBKDF2', hash: 'SHA-256', salt: unb64(saltB64), iterations: iter || 600000 }, base, 512));
-      const key = await crypto.subtle.importKey('raw', bits.slice(0, 32), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+      const r = bits.slice(0, 32);
       const auth = b64(bits.slice(32));
-      const raw = bits.slice(0, 32);
       bits.fill(0);
-      return { key, auth, raw };
+      return { key: await importRaw(r), auth, raw: r };
     },
-    // Сохраняет ключ. Сначала как неизвлекаемый CryptoKey; если браузер (некоторые версии Safari)
-    // не умеет хранить CryptoKey — сохраняет байты ключа (только на этом устройстве).
-    async save(key, raw) {
-      cached = key;
-      let ok = false;
-      try { await tx('readwrite', (s) => s.put(key, 'enc')); ok = !!(await tx('readonly', (s) => s.get('enc'))); } catch (e) { ok = false; }
-      if (!ok && raw) { await tx('readwrite', (s) => s.put({ raw: new Uint8Array(raw) }, 'enc')); ok = true; }
-      if (!ok) throw new Error('браузер не сохранил ключ');
+    // хранение: байты ключа + пропуск (только на этом устройстве)
+    async save(key, rawBytes) {
+      cached = key; raw = new Uint8Array(rawBytes);
+      await tx('readwrite', (s) => s.put({ raw }, 'enc'));
     },
+    async saveSession(t) { sess = t; await tx('readwrite', (s) => s.put(t, 'sess')); },
     async key() {
       if (cached) return cached;
+      if (raw) { cached = await importRaw(raw); return cached; }
       let v = null;
       try { v = await tx('readonly', (s) => s.get('enc')); } catch (e) { v = null; }
-      if (v && v.raw) cached = await importRaw(v.raw);
-      else cached = v || null;
+      if (v && v.raw) { raw = new Uint8Array(v.raw); cached = await importRaw(raw); }
       return cached;
     },
-    async forget() { cached = null; sess = null; try { await tx('readwrite', (s) => { s.delete('enc'); s.delete('sess'); }); } catch (e) { } },
-    async saveSession(t) { sess = t; await tx('readwrite', (s) => s.put(t, 'sess')); },
-    async session() { if (!sess) { try { sess = (await tx('readonly', (s) => s.get('sess'))) || null; } catch (e) { sess = null; } } return sess; },
-    reset() { cached = null; sess = null; },
+    async session() {
+      if (sess) return sess;
+      try { sess = (await tx('readonly', (s) => s.get('sess'))) || null; } catch (e) { sess = null; }
+      return sess;
+    },
+    async exportForWorker() { await E2E.key(); await E2E.session(); return raw && sess ? { raw, sess } : null; },
+    async setFromPage(r, s) { raw = new Uint8Array(r); cached = await importRaw(raw); sess = s; },
+    async forget() { cached = null; raw = null; sess = null; try { await tx('readwrite', (s) => { s.delete('enc'); s.delete('sess'); }); } catch (e) { } },
+    reset() { cached = null; raw = null; sess = null; },
     async seal(bytes, aad) {
       const k = await E2E.key(); if (!k) throw new Error('nokey');
       const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -79,7 +81,7 @@
       const st = await E2E.session();
       if (st) hdr['X-SR-Session'] = st;
       const r = await fetch('/rpc', { method: 'POST', body: await E2E.seal(plain, 'req'), credentials: 'same-origin', cache: 'no-store', headers: hdr });
-      if (r.status === 401) E2E.why = 'сервер не принял вход при запросе ' + path;
+      if (r.status === 401) E2E.why = 'сервер не принял вход при запросе ' + path + (st ? '' : ' (пропуск не найден)');
       if (r.status !== 200) return new Response(await r.arrayBuffer(), { status: r.status, headers: { 'Content-Type': 'application/json' } });
       const pt = await E2E.open(new Uint8Array(await r.arrayBuffer()), 'res');
       const hl = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0);
