@@ -115,16 +115,24 @@ def client_ip(req: web.Request) -> str:
         or (req.remote or "?")
 
 
-def session_ok(req: web.Request) -> bool:
-    tok = req.cookies.get(COOKIE)
-    if not tok:
+def token_ok(tok: str | None) -> bool:
+    if not tok or len(tok) > 200:
         return False
     s = R.sessions.get(hashlib.sha256(tok.encode()).hexdigest())
     return bool(s and s["exp"] > time.time() and s["epoch"] == EPOCH)
 
 
+def session_token(req: web.Request) -> str | None:
+    # cookie (обычные браузеры) или заголовок X-SR-Session (Safari не всегда шлёт cookie из service worker)
+    return req.headers.get("X-SR-Session") or req.cookies.get(COOKIE)
+
+
+def session_ok(req: web.Request) -> bool:
+    return token_ok(session_token(req))
+
+
 # ---------------------------------------------------------------- защита
-PROTECTED = ("/ws", "/rpc", "/api/logout_all")
+PROTECTED = ("/rpc", "/api/logout_all")
 
 
 @web.middleware
@@ -226,14 +234,14 @@ async def api_login(req):
     R.sessions = {k: v for k, v in R.sessions.items() if v["exp"] > now}
     R.sessions[hashlib.sha256(tok.encode()).hexdigest()] = {"exp": now + SESSION_HOURS * 3600, "epoch": EPOCH}
     log.info("вход с %s", ip)
-    resp = web.json_response({"ok": True})
+    resp = web.json_response({"ok": True, "session": tok, "hours": SESSION_HOURS})
     resp.set_cookie(COOKIE, tok, max_age=int(SESSION_HOURS * 3600), httponly=True, secure=not INSECURE,
                     samesite="Lax", path="/")
     return resp
 
 
 async def api_logout(req):
-    tok = req.cookies.get(COOKIE)
+    tok = session_token(req)
     if tok:
         R.sessions.pop(hashlib.sha256(tok.encode()).hexdigest(), None)
     resp = web.json_response({"ok": True})
@@ -254,6 +262,19 @@ async def api_logout_all(req):
 async def ws_view(req):
     ws = web.WebSocketResponse(heartbeat=25, compress=True)
     await ws.prepare(req)
+    tok = session_token(req)
+    if not token_ok(tok):
+        # Safari: cookie может не прийти — ждём первое сообщение {"type":"auth","token":...}
+        try:
+            msg = await ws.receive(timeout=8)
+            d = json.loads(msg.data) if msg.type == WSMsgType.TEXT else {}
+            tok = d.get("token") if d.get("type") == "auth" else None
+        except Exception:
+            tok = None
+        if not token_ok(tok):
+            await ws.send_str(json.dumps({"type": "auth_failed"}))
+            await ws.close(code=4401)
+            return ws
     R.viewers.add(ws)
     await R.tell_agent_viewers()
     await R.send_all(R.meta())
@@ -261,7 +282,7 @@ async def ws_view(req):
         if R.state_blob:
             await ws.send_str(json.dumps({"type": "enc", "d": R.state_blob}))
         async for msg in ws:
-            if not session_ok(req):
+            if not token_ok(tok):
                 break
             if msg.type == WSMsgType.TEXT and msg.data == "ping":
                 await ws.send_str(R.meta())

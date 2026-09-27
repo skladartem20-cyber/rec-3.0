@@ -34,7 +34,7 @@ const nowSrv = () => Date.now() / 1000 + S.skew;
 async function api(path, data) {
   const opt = data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) };
   const r = await fetch(path, opt);
-  if (r.status === 401) { authLost(); throw new Error('auth'); }
+  if (r.status === 401) { authLost('сервер не принял вход при запросе ' + path); throw new Error('auth'); }
   return r.json();
 }
 
@@ -63,9 +63,13 @@ function copy(text) {
 let ws, wsTimer, wsBackoff = 500;
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { wsBackoff = 500; S.wsOpen = true; $('#offline').classList.remove('show'); };
+  ws.onopen = async () => {
+    wsBackoff = 500; S.wsOpen = true; $('#offline').classList.remove('show');
+    if (window.E2E) { try { const t = await window.E2E.session(); if (t) ws.send(JSON.stringify({ type: 'auth', token: t })); } catch { } }
+  };
   ws.onmessage = async (e) => {
     let d = JSON.parse(e.data);
+    if (d.type === 'auth_failed') { authLost('сервер не принял вход (окно данных)'); return; }
     if (d.type === 'meta') {        // облако: открытые служебные данные (онлайн ли ПК)
       S.meta = d;
       if (!S.cloud) { S.cloud = true; applyMode(); }
@@ -926,13 +930,14 @@ async function keyProblem() {
 }
 
 // ------------------------------------------------------------ потеря входа: без бесконечного круга
-function authLost() {
+function authLost(why) {
   const now = Date.now();
-  const hist = JSON.parse(sessionStorage.getItem('sr-401') || '[]').filter((t) => now - t < 60000);
+  const hist = JSON.parse(sessionStorage.getItem('sr-401') || '[]').filter((t) => now - t < 600000);
   hist.push(now);
   sessionStorage.setItem('sr-401', JSON.stringify(hist));
+  sessionStorage.setItem('sr-why', why || (window.E2E && window.E2E.why) || 'сервер не принял вход');
   if (hist.length >= 3) {
-    $('#offline').textContent = 'Вход не сохраняется. На iPhone: Настройки → Safari → выключите «Блокировать все cookie», не используйте приватный режим, затем войдите снова.';
+    $('#offline').textContent = 'Вход не сохраняется (' + sessionStorage.getItem('sr-why') + '). Удалите данные сайта в Настройки → Safari → Дополнения → Данные сайтов и войдите снова.';
     $('#offline').classList.add('show');
     return;
   }

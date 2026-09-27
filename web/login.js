@@ -1,6 +1,8 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 (async () => {
+  const why = sessionStorage.getItem('sr-why');
+  if (why) { $('err').textContent = 'Причина возврата на вход: ' + why; sessionStorage.removeItem('sr-why'); }
   try {
     const i = await (await fetch('/api/e2e_salt')).json();
     $('code').hidden = !i.totp;
@@ -23,10 +25,11 @@ $('f').addEventListener('submit', async (e) => {
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || 'Ошибка входа');
     await E2E.save(key, raw);
+    if (d.session) await E2E.saveSession(d.session);
     E2E.reset();
     if (!(await E2E.key())) throw new Error('Браузер не сохранил ключ. Выключите приватный режим и разрешите данные сайтов.');
-    const h = await (await fetch('/healthz', { cache: 'no-store', credentials: 'same-origin' })).json();
-    if (!h.session) throw new Error('Браузер не сохранил вход (cookie). Настройки → Safari → выключите «Блокировать все cookie» и повторите.');
+    E2E.reset();
+    if (!(await E2E.session())) throw new Error('Браузер не сохранил вход. Выключите приватный режим Safari и повторите.');
     sessionStorage.removeItem('sr-401');
     if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('reset');
     location.replace('/');

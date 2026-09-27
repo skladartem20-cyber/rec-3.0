@@ -27,7 +27,7 @@
     });
   }
   const importRaw = (raw) => crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-  let cached = null;
+  let cached = null, sess = null;
   const E2E = {
     async derive(password, saltB64, iter) {
       const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
@@ -56,8 +56,10 @@
       else cached = v || null;
       return cached;
     },
-    async forget() { cached = null; try { await tx('readwrite', (s) => s.delete('enc')); } catch (e) { } },
-    reset() { cached = null; },
+    async forget() { cached = null; sess = null; try { await tx('readwrite', (s) => { s.delete('enc'); s.delete('sess'); }); } catch (e) { } },
+    async saveSession(t) { sess = t; await tx('readwrite', (s) => s.put(t, 'sess')); },
+    async session() { if (!sess) { try { sess = (await tx('readonly', (s) => s.get('sess'))) || null; } catch (e) { sess = null; } } return sess; },
+    reset() { cached = null; sess = null; },
     async seal(bytes, aad) {
       const k = await E2E.key(); if (!k) throw new Error('nokey');
       const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -73,8 +75,11 @@
     async request(method, path, headers, body) {
       const id = b64(crypto.getRandomValues(new Uint8Array(12)));
       const plain = enc.encode(JSON.stringify({ id, ts: Date.now(), method, path, headers, body }));
-      const r = await fetch('/rpc', { method: 'POST', body: await E2E.seal(plain, 'req'), credentials: 'same-origin', cache: 'no-store',
-        headers: { 'Content-Type': 'application/octet-stream' } });
+      const hdr = { 'Content-Type': 'application/octet-stream' };
+      const st = await E2E.session();
+      if (st) hdr['X-SR-Session'] = st;
+      const r = await fetch('/rpc', { method: 'POST', body: await E2E.seal(plain, 'req'), credentials: 'same-origin', cache: 'no-store', headers: hdr });
+      if (r.status === 401) E2E.why = 'сервер не принял вход при запросе ' + path;
       if (r.status !== 200) return new Response(await r.arrayBuffer(), { status: r.status, headers: { 'Content-Type': 'application/json' } });
       const pt = await E2E.open(new Uint8Array(await r.arrayBuffer()), 'res');
       const hl = new DataView(pt.buffer, pt.byteOffset, pt.byteLength).getUint32(0);
