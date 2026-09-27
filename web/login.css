@@ -1,0 +1,8 @@
+body.login { display: grid; place-items: center; min-height: 100%; padding: 20px; }
+.login .box { width: min(340px, 100%); display: flex; flex-direction: column; gap: 12px; }
+.login .brand { font-size: 22px; justify-content: center; margin-bottom: 6px; }
+.login p { color: var(--muted); text-align: center; margin: 0; font-size: 13px; }
+.login input { height: 50px; padding: 0 14px; font-size: 17px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); outline: none; }
+.login input:focus { border-color: var(--start); }
+.login .btn { height: 48px; font-size: 16px; }
+.login .err { color: var(--err); text-align: center; min-height: 20px; font-size: 14px; }
